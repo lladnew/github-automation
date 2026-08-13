@@ -1,0 +1,191 @@
+name: Shared project lifecycle
+
+on:
+  workflow_call:
+    inputs:
+      project_owner:
+        description: User account that owns the Projects v2 board
+        required: true
+        type: string
+      project_number:
+        description: Projects v2 board number
+        required: true
+        type: number
+    secrets:
+      projects_token:
+        description: Token with project read/write access
+        required: true
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  synchronize:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.projects_token }}
+      PROJECT_OWNER: ${{ inputs.project_owner }}
+      PROJECT_NUMBER: ${{ inputs.project_number }}
+      EVENT_NAME: ${{ github.event_name }}
+      EVENT_ACTION: ${{ github.event.action }}
+      EVENT_PATH: ${{ github.event_path }}
+      REPOSITORY_TOKEN: ${{ github.token }}
+    steps:
+      - name: Resolve lifecycle change
+        id: lifecycle
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          status=""
+          content_ids=""
+
+          if [[ "$EVENT_NAME" == "issues" ]]; then
+            content_ids="$(jq -r '.issue.node_id' "$EVENT_PATH")"
+            case "$EVENT_ACTION" in
+              assigned) status="In Progress" ;;
+              opened) status="Todo" ;;
+            esac
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            pr_node_id="$(jq -r '.pull_request.node_id' "$EVENT_PATH")"
+            content_ids="$(gh api graphql \
+              -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { closingIssuesReferences(first: 50) { nodes { id } } } } }' \
+              -f id="$pr_node_id" \
+              --jq '.data.node.closingIssuesReferences.nodes[].id')"
+
+            case "$EVENT_ACTION" in
+              opened) status="In Review" ;;
+              ready_for_review) status="In Review" ;;
+              converted_to_draft) status="In Review" ;;
+              closed)
+                if [[ "$(jq -r '.pull_request.merged' "$EVENT_PATH")" == "true" ]]; then
+                  status="Done"
+                else
+                  status="Ready"
+                fi
+                ;;
+            esac
+          fi
+
+          {
+            echo "status=$status"
+            echo "content_ids<<EOF"
+            echo "$content_ids"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Read project configuration
+        if: steps.lifecycle.outputs.content_ids != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh api graphql \
+            -f query='query($login: String!, $number: Int!) {
+              user(login: $login) {
+                projectV2(number: $number) {
+                  id
+                  fields(first: 50) {
+                    nodes {
+                      ... on ProjectV2SingleSelectField {
+                        id
+                        name
+                        options { id name }
+                      }
+                    }
+                  }
+                }
+              }
+            }' \
+            -f login="$PROJECT_OWNER" \
+            -F number="$PROJECT_NUMBER" > "$RUNNER_TEMP/project.json"
+
+          project_id="$(jq -r '.data.user.projectV2.id' "$RUNNER_TEMP/project.json")"
+          [[ "$project_id" != "null" && -n "$project_id" ]]
+          echo "PROJECT_ID=$project_id" >> "$GITHUB_ENV"
+
+      - name: Synchronize project fields
+        if: steps.lifecycle.outputs.content_ids != ''
+        env:
+          CONTENT_IDS: ${{ steps.lifecycle.outputs.content_ids }}
+          LIFECYCLE_STATUS: ${{ steps.lifecycle.outputs.status }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          set_single_select() {
+            local item_id="$1" field_name="$2" option_name="$3"
+            [[ -n "$option_name" ]] || return 0
+
+            local field_id option_id
+            field_id="$(jq -r --arg name "$field_name" '.data.user.projectV2.fields.nodes[] | select(.name == $name) | .id' "$RUNNER_TEMP/project.json")"
+            option_id="$(jq -r --arg field "$field_name" --arg option "$option_name" '.data.user.projectV2.fields.nodes[] | select(.name == $field) | .options[] | select(.name == $option) | .id' "$RUNNER_TEMP/project.json")"
+            [[ -n "$field_id" && -n "$option_id" ]] || {
+              echo "Missing project option: $field_name=$option_name" >&2
+              return 1
+            }
+
+            gh api graphql \
+              -f query='mutation($project: ID!, $item: ID!, $field: ID!, $option: String!) {
+                updateProjectV2ItemFieldValue(input: {
+                  projectId: $project,
+                  itemId: $item,
+                  fieldId: $field,
+                  value: { singleSelectOptionId: $option }
+                }) { projectV2Item { id } }
+              }' \
+              -f project="$PROJECT_ID" \
+              -f item="$item_id" \
+              -f field="$field_id" \
+              -f option="$option_id" --silent
+          }
+
+          while IFS= read -r content_id; do
+            [[ -n "$content_id" ]] || continue
+
+            item_id="$(gh api graphql \
+              -f query='mutation($project: ID!, $content: ID!) {
+                addProjectV2ItemById(input: { projectId: $project, contentId: $content }) {
+                  item { id }
+                }
+              }' \
+              -f project="$PROJECT_ID" \
+              -f content="$content_id" \
+              --jq '.data.addProjectV2ItemById.item.id')"
+
+            set_single_select "$item_id" "Status" "$LIFECYCLE_STATUS"
+
+            if [[ "$EVENT_NAME" == "issues" && ( "$EVENT_ACTION" == "opened" || "$EVENT_ACTION" == "edited" ) ]]; then
+              body="$(jq -r '.issue.body // ""' "$EVENT_PATH")"
+              extract_answer() {
+                local heading="$1"
+                awk -v heading="### $heading" '
+                  $0 == heading { found=1; next }
+                  found && /^### / { exit }
+                  found && NF { print; exit }
+                ' <<< "$body"
+              }
+
+              set_single_select "$item_id" "Priority" "$(extract_answer Priority)"
+              set_single_select "$item_id" "Area" "$(extract_answer Area)"
+              set_single_select "$item_id" "Effort" "$(extract_answer Effort)"
+              set_single_select "$item_id" "Target" "$(extract_answer Target)"
+
+              priority="$(extract_answer Priority)"
+              area="$(extract_answer Area)"
+              effort="$(extract_answer Effort)"
+              target="$(extract_answer Target)"
+              labels="$(jq -cn \
+                --arg priority "priority:$(sed -E 's/^P([0-3]).*/p\1/' <<< "$priority" | tr '[:upper:]' '[:lower:]')" \
+                --arg area "area:$(tr '[:upper:]' '[:lower:]' <<< "$area" | sed -E 's/[^a-z0-9]+/-/g; s/^-|-$//g')" \
+                --arg effort "effort:$(tr '[:upper:]' '[:lower:]' <<< "$effort")" \
+                --arg target "target:$(tr '[:upper:]' '[:lower:]' <<< "$target")" \
+                '[ $priority, $area, $effort, $target ] | map(select(. != "priority:" and . != "area:" and . != "effort:" and . != "target:"))')"
+
+              GH_TOKEN="$REPOSITORY_TOKEN" gh api \
+                --method POST \
+                "repos/${GITHUB_REPOSITORY}/issues/$(jq -r '.issue.number' "$EVENT_PATH")/labels" \
+                --input - <<< "{\"labels\":$labels}" --silent
+            fi
+          done <<< "$CONTENT_IDS"
