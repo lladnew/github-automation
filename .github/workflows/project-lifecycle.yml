@@ -30,7 +30,6 @@ jobs:
       PROJECT_NUMBER: ${{ inputs.project_number }}
       EVENT_NAME: ${{ github.event_name }}
       EVENT_ACTION: ${{ github.event.action }}
-      EVENT_PATH: ${{ github.event_path }}
       REPOSITORY_TOKEN: ${{ github.token }}
     steps:
       - name: Resolve lifecycle change
@@ -43,13 +42,13 @@ jobs:
           content_ids=""
 
           if [[ "$EVENT_NAME" == "issues" ]]; then
-            content_ids="$(jq -r '.issue.node_id' "$EVENT_PATH")"
+            content_ids="$(jq -r '.issue.node_id' "$GITHUB_EVENT_PATH")"
             case "$EVENT_ACTION" in
               assigned) status="In Progress" ;;
               opened) status="Todo" ;;
             esac
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then
-            pr_node_id="$(jq -r '.pull_request.node_id' "$EVENT_PATH")"
+            pr_node_id="$(jq -r '.pull_request.node_id' "$GITHUB_EVENT_PATH")"
             content_ids="$(gh api graphql \
               -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { closingIssuesReferences(first: 50) { nodes { id } } } } }' \
               -f id="$pr_node_id" \
@@ -60,7 +59,7 @@ jobs:
               ready_for_review) status="In Review" ;;
               converted_to_draft) status="In Review" ;;
               closed)
-                if [[ "$(jq -r '.pull_request.merged' "$EVENT_PATH")" == "true" ]]; then
+                if [[ "$(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH")" == "true" ]]; then
                   status="Done"
                 else
                   status="Ready"
@@ -157,7 +156,7 @@ jobs:
             set_single_select "$item_id" "Status" "$LIFECYCLE_STATUS"
 
             if [[ "$EVENT_NAME" == "issues" && ( "$EVENT_ACTION" == "opened" || "$EVENT_ACTION" == "edited" ) ]]; then
-              body="$(jq -r '.issue.body // ""' "$EVENT_PATH")"
+              body="$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")"
               extract_answer() {
                 local heading="$1"
                 awk -v heading="### $heading" '
@@ -185,7 +184,7 @@ jobs:
 
               GH_TOKEN="$REPOSITORY_TOKEN" gh api \
                 --method POST \
-                "repos/${GITHUB_REPOSITORY}/issues/$(jq -r '.issue.number' "$EVENT_PATH")/labels" \
+                "repos/${GITHUB_REPOSITORY}/issues/$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")/labels" \
                 --input - <<< "{\"labels\":$labels}" --silent
             fi
           done <<< "$CONTENT_IDS"
