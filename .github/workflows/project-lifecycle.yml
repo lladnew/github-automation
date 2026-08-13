@@ -216,6 +216,6 @@ jobs:
               GH_TOKEN="$REPOSITORY_TOKEN" gh api \
                 --method POST \
                 "repos/${GITHUB_REPOSITORY}/issues/$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")/labels" \
-                --input - <<< "{\"labels\":$labels}" --silent
+                --input - <<< "$labels" --silent
             fi
           done <<< "$CONTENT_IDS"
