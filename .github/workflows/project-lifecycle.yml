@@ -11,6 +11,10 @@ on:
         description: Projects v2 board number
         required: true
         type: number
+      token_expires_on:
+        description: Token expiration date in YYYY-MM-DD format
+        required: true
+        type: string
     secrets:
       projects_token:
         description: Token with project read/write access
@@ -32,6 +36,33 @@ jobs:
       EVENT_ACTION: ${{ github.event.action }}
       REPOSITORY_TOKEN: ${{ github.token }}
     steps:
+      - name: Check token rotation window
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          TOKEN_EXPIRES_ON: ${{ inputs.token_expires_on }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TOKEN_EXPIRES_ON" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+            echo "PROJECTS_TOKEN expiration date is missing or invalid." >&2
+            exit 1
+          }
+
+          today="$(date -u +%s)"
+          expires="$(date -u -d "$TOKEN_EXPIRES_ON" +%s)"
+          warning="$(date -u -d "$TOKEN_EXPIRES_ON - 14 days" +%s)"
+
+          if (( today >= expires )); then
+            echo "PROJECTS_TOKEN expired on $TOKEN_EXPIRES_ON. Rotate it now." >&2
+            exit 1
+          fi
+          if (( today >= warning )); then
+            echo "PROJECTS_TOKEN expires on $TOKEN_EXPIRES_ON. Rotate it within 14 days." >&2
+            exit 1
+          fi
+
+          echo "PROJECTS_TOKEN rotation window is healthy through $TOKEN_EXPIRES_ON."
+
       - name: Resolve lifecycle change
         id: lifecycle
         shell: bash
@@ -76,7 +107,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Read project configuration
-        if: steps.lifecycle.outputs.content_ids != ''
+        if: steps.lifecycle.outputs.content_ids != '' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail
