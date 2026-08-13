@@ -11,6 +11,10 @@ on:
         description: Projects v2 board number
         required: true
         type: number
+      token_expires_on:
+        description: Token expiration date in YYYY-MM-DD format
+        required: true
+        type: string
     secrets:
       projects_token:
         description: Token with project read/write access
@@ -30,9 +34,35 @@ jobs:
       PROJECT_NUMBER: ${{ inputs.project_number }}
       EVENT_NAME: ${{ github.event_name }}
       EVENT_ACTION: ${{ github.event.action }}
-      EVENT_PATH: ${{ github.event_path }}
       REPOSITORY_TOKEN: ${{ github.token }}
     steps:
+      - name: Check token rotation window
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          TOKEN_EXPIRES_ON: ${{ inputs.token_expires_on }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$TOKEN_EXPIRES_ON" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || {
+            echo "PROJECTS_TOKEN expiration date is missing or invalid." >&2
+            exit 1
+          }
+
+          today="$(date -u +%s)"
+          expires="$(date -u -d "$TOKEN_EXPIRES_ON" +%s)"
+          warning="$(date -u -d "$TOKEN_EXPIRES_ON - 14 days" +%s)"
+
+          if (( today >= expires )); then
+            echo "PROJECTS_TOKEN expired on $TOKEN_EXPIRES_ON. Rotate it now." >&2
+            exit 1
+          fi
+          if (( today >= warning )); then
+            echo "PROJECTS_TOKEN expires on $TOKEN_EXPIRES_ON. Rotate it within 14 days." >&2
+            exit 1
+          fi
+
+          echo "PROJECTS_TOKEN rotation window is healthy through $TOKEN_EXPIRES_ON."
+
       - name: Resolve lifecycle change
         id: lifecycle
         shell: bash
@@ -43,13 +73,13 @@ jobs:
           content_ids=""
 
           if [[ "$EVENT_NAME" == "issues" ]]; then
-            content_ids="$(jq -r '.issue.node_id' "$EVENT_PATH")"
+            content_ids="$(jq -r '.issue.node_id' "$GITHUB_EVENT_PATH")"
             case "$EVENT_ACTION" in
               assigned) status="In Progress" ;;
               opened) status="Todo" ;;
             esac
           elif [[ "$EVENT_NAME" == "pull_request" ]]; then
-            pr_node_id="$(jq -r '.pull_request.node_id' "$EVENT_PATH")"
+            pr_node_id="$(jq -r '.pull_request.node_id' "$GITHUB_EVENT_PATH")"
             content_ids="$(gh api graphql \
               -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { closingIssuesReferences(first: 50) { nodes { id } } } } }' \
               -f id="$pr_node_id" \
@@ -60,7 +90,7 @@ jobs:
               ready_for_review) status="In Review" ;;
               converted_to_draft) status="In Review" ;;
               closed)
-                if [[ "$(jq -r '.pull_request.merged' "$EVENT_PATH")" == "true" ]]; then
+                if [[ "$(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH")" == "true" ]]; then
                   status="Done"
                 else
                   status="Ready"
@@ -77,7 +107,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Read project configuration
-        if: steps.lifecycle.outputs.content_ids != ''
+        if: steps.lifecycle.outputs.content_ids != '' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         shell: bash
         run: |
           set -euo pipefail
@@ -157,7 +187,7 @@ jobs:
             set_single_select "$item_id" "Status" "$LIFECYCLE_STATUS"
 
             if [[ "$EVENT_NAME" == "issues" && ( "$EVENT_ACTION" == "opened" || "$EVENT_ACTION" == "edited" ) ]]; then
-              body="$(jq -r '.issue.body // ""' "$EVENT_PATH")"
+              body="$(jq -r '.issue.body // ""' "$GITHUB_EVENT_PATH")"
               extract_answer() {
                 local heading="$1"
                 awk -v heading="### $heading" '
@@ -185,7 +215,7 @@ jobs:
 
               GH_TOKEN="$REPOSITORY_TOKEN" gh api \
                 --method POST \
-                "repos/${GITHUB_REPOSITORY}/issues/$(jq -r '.issue.number' "$EVENT_PATH")/labels" \
+                "repos/${GITHUB_REPOSITORY}/issues/$(jq -r '.issue.number' "$GITHUB_EVENT_PATH")/labels" \
                 --input - <<< "{\"labels\":$labels}" --silent
             fi
           done <<< "$CONTENT_IDS"
