@@ -13,12 +13,18 @@ Supported transitions:
 
 - issue assigned: `In Progress`
 - linked pull request opened, including a draft: `In Review`
+- pull request review requested: `In Review`
 - pull request marked ready for review: `In Review`
 - merged pull request: `Done`
 - unmerged pull request closed: `Ready`
 
 Pull requests must link issues with a GitHub closing keyword such as
 `Closes #123`.
+
+Caller workflows should use the metadata-only `pull_request_target` event so
+agent-authored pull requests can update project status without waiting for
+workflow approval. This shared workflow never checks out or executes pull
+request code.
 
 The workflow also reads standardized planning answers from issue forms and
 sets matching `Priority`, `Area`, `Effort`, and `Target` project fields.

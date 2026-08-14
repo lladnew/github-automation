@@ -78,7 +78,7 @@ jobs:
               assigned) status="In Progress" ;;
               opened) status="Todo" ;;
             esac
-          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+          elif [[ "$EVENT_NAME" == "pull_request" || "$EVENT_NAME" == "pull_request_target" ]]; then
             pr_node_id="$(jq -r '.pull_request.node_id' "$GITHUB_EVENT_PATH")"
             content_ids="$(gh api graphql \
               -f query='query($id: ID!) { node(id: $id) { ... on PullRequest { closingIssuesReferences(first: 50) { nodes { id } } } } }' \
@@ -87,6 +87,7 @@ jobs:
 
             case "$EVENT_ACTION" in
               opened) status="In Review" ;;
+              review_requested) status="In Review" ;;
               ready_for_review) status="In Review" ;;
               converted_to_draft) status="In Review" ;;
               closed)
