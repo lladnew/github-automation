@@ -87,10 +87,10 @@ jobs:
               --jq '.data.node.closingIssuesReferences.nodes[].id')"
 
             case "$EVENT_ACTION" in
-              opened) status="In Review" ;;
-              review_requested) status="In Review" ;;
-              ready_for_review) status="In Review" ;;
-              converted_to_draft) status="In Review" ;;
+              opened) status="Needs review" ;;
+              review_requested) status="Needs review" ;;
+              ready_for_review) status="Needs review" ;;
+              converted_to_draft) status="Needs review" ;;
               closed)
                 if [[ "$(jq -r '.pull_request.merged' "$GITHUB_EVENT_PATH")" == "true" ]]; then
                   status="Done"
@@ -103,7 +103,7 @@ jobs:
             run_conclusion="$(jq -r '.workflow_run.conclusion' "$GITHUB_EVENT_PATH")"
             case "$run_conclusion" in
               failure) status="Blocked" ;;
-              success) status="In Review" ;;
+              success) status="Needs review" ;;
               *) status="" ;;
             esac
 
