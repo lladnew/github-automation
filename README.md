@@ -15,6 +15,8 @@ Supported transitions:
 - linked pull request opened, including a draft: `In Review`
 - pull request review requested: `In Review`
 - pull request marked ready for review: `In Review`
+- Copilot cloud-agent workflow failed: `Blocked`
+- later Copilot cloud-agent workflow succeeded: `In Review`
 - merged pull request: `Done`
 - unmerged pull request closed: `Ready`
 
@@ -25,6 +27,19 @@ Caller workflows should use the metadata-only `pull_request_target` event so
 agent-authored pull requests can update project status without waiting for
 workflow approval. This shared workflow never checks out or executes pull
 request code.
+
+Caller workflows must also listen for completion of the Copilot cloud-agent
+workflow:
+
+```yaml
+workflow_run:
+  workflows: ["Running Copilot cloud agent"]
+  types: [completed]
+```
+
+Only `failure` and `success` conclusions change project status. The workflow
+resolves the agent run's pull request and follows its closing issue links, so
+unrelated issues are not changed.
 
 The workflow also reads standardized planning answers from issue forms and
 sets matching `Priority`, `Area`, `Effort`, and `Target` project fields.

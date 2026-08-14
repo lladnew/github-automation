@@ -21,6 +21,7 @@ on:
         required: true
 
 permissions:
+  actions: read
   contents: read
   issues: write
   pull-requests: read
@@ -98,6 +99,43 @@ jobs:
                 fi
                 ;;
             esac
+          elif [[ "$EVENT_NAME" == "workflow_run" ]]; then
+            run_conclusion="$(jq -r '.workflow_run.conclusion' "$GITHUB_EVENT_PATH")"
+            case "$run_conclusion" in
+              failure) status="Blocked" ;;
+              success) status="In Review" ;;
+              *) status="" ;;
+            esac
+
+            if [[ -n "$status" ]]; then
+              pr_numbers="$(jq -r '.workflow_run.pull_requests[].number' "$GITHUB_EVENT_PATH")"
+              head_branch="$(jq -r '.workflow_run.head_branch // ""' "$GITHUB_EVENT_PATH")"
+
+              if [[ -z "$pr_numbers" && -n "$head_branch" ]]; then
+                repository_owner="${GITHUB_REPOSITORY%%/*}"
+                pr_numbers="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/pulls" \
+                  -f state=all \
+                  -f head="${repository_owner}:${head_branch}" \
+                  --jq '.[].number')"
+              fi
+
+              while IFS= read -r pr_number; do
+                [[ -n "$pr_number" ]] || continue
+                linked_ids="$(gh api graphql \
+                  -f query='query($owner: String!, $repo: String!, $number: Int!) {
+                    repository(owner: $owner, name: $repo) {
+                      pullRequest(number: $number) {
+                        closingIssuesReferences(first: 50) { nodes { id } }
+                      }
+                    }
+                  }' \
+                  -f owner="${GITHUB_REPOSITORY%%/*}" \
+                  -f repo="${GITHUB_REPOSITORY#*/}" \
+                  -F number="$pr_number" \
+                  --jq '.data.repository.pullRequest.closingIssuesReferences.nodes[].id')"
+                content_ids="${content_ids}${content_ids:+$'\n'}${linked_ids}"
+              done <<< "$pr_numbers"
+            fi
           fi
 
           {
